@@ -1,27 +1,42 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "feedbackiq",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-03-10",
-  "compatibility_flags": ["nodejs_compat"],
-  "observability": {
-    "enabled": true
-  },
-  "upload_source_maps": true,
-  "d1_databases": [
-    {
-      "binding": "feedbackiq_db",
-      "database_name": "feedbackiq-db",
-      "database_id": "2f87df3a-f7c7-4987-bb02-6dc4c96e9ee1"
-    }
-  ],
-  "kv_namespaces": [
-    {
-      "binding": "feedbackiq_cache",
-      "id": "cf68cc8d7d3746ca8bcf5353d375896e"
-    }
-  ],
-  "ai": {
-    "binding": "AI"
-  }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "feedbackiq",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-03-10",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"d1_databases": [
+		{
+			"binding": "feedbackiq_db",
+			"database_name": "feedbackiq-db",
+			"database_id": "2f87df3a-f7c7-4987-bb02-6dc4c96e9ee1"
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "feedbackiq_cache",
+			"id": "cf68cc8d7d3746ca8bcf5353d375896e"
+		}
+	],
+	"ai": {
+		"binding": "AI"
+	},
+	"r2_buckets": [
+		{
+			"binding": "feedbackiq_reports",
+			"bucket_name": "feedbackiq-reports"
+		}
+	],
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "feedbackiq-index",
+			"remote": true
+		}
+	]
 }

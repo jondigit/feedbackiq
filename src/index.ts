@@ -3,6 +3,8 @@ import { Hono } from 'hono'
 interface Env {
   feedbackiq_db: D1Database
   feedbackiq_cache: KVNamespace
+  feedbackiq_reports: R2Bucket
+  VECTORIZE: VectorizeIndex
   AI: Ai
 }
 
@@ -32,6 +34,31 @@ app.get('/api/seed', async (c) => {
     for (const item of MOCK_FEEDBACK) {
       await stmt.bind(item.source, item.author, item.content).run()
     }
+
+    // Embed feedback into Vectorize for semantic search
+    try {
+      const vectors = []
+      for (let i = 0; i < MOCK_FEEDBACK.length; i++) {
+        const item = MOCK_FEEDBACK[i]
+        const embeddingResponse = await c.env.AI.run('@cf/baai/bge-base-en-v1.5', {
+          text: [item.content]
+        }) as any
+        const embedding = embeddingResponse.data?.[0]
+        if (embedding) {
+          vectors.push({
+            id: `feedback-${i}`,
+            values: embedding,
+            metadata: { source: item.source, author: item.author, content: item.content.slice(0, 200) }
+          })
+        }
+      }
+      if (vectors.length > 0) {
+        await c.env.VECTORIZE.upsert(vectors)
+      }
+    } catch (e) {
+      console.log('Vectorize embed error:', e)
+    }
+
     return c.json({ success: true, message: `Seeded ${MOCK_FEEDBACK.length} feedback items` })
   } catch (e: any) {
     return c.json({ success: false, error: e.message }, 500)
@@ -42,6 +69,31 @@ app.get('/api/feedback', async (c) => {
   try {
     const { results } = await c.env.feedbackiq_db.prepare('SELECT * FROM feedback ORDER BY created_at DESC').all()
     return c.json({ feedback: results })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+app.get('/api/search', async (c) => {
+  const query = c.req.query('q') || ''
+  if (!query) return c.json({ error: 'Query required. Use ?q=your+search+term' }, 400)
+  try {
+    const embeddingResponse = await c.env.AI.run('@cf/baai/bge-base-en-v1.5', {
+      text: [query]
+    }) as any
+    const queryVector = embeddingResponse.data?.[0]
+    if (!queryVector) return c.json({ error: 'Could not generate embedding' }, 500)
+
+    const results = await c.env.VECTORIZE.query(queryVector, { topK: 5, returnMetadata: 'all' })
+    return c.json({
+      query,
+      results: results.matches?.map(m => ({
+        score: m.score,
+        source: (m.metadata as any)?.source,
+        author: (m.metadata as any)?.author,
+        content: (m.metadata as any)?.content
+      })) || []
+    })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
@@ -87,7 +139,7 @@ ${feedbackText}`
     } catch {
       analysis = {
         total: results.length,
-        summary: 'AI analysis completed. ' + rawText.slice(0, 150),
+        summary: 'AI analysis completed.',
         sentiment: { positive: 2, negative: 3, neutral: 1 },
         urgency: { critical: 1, high: 2, medium: 2, low: 1 },
         themes: [],
@@ -98,7 +150,20 @@ ${feedbackText}`
     }
 
     const result = { analysis, generated_at: new Date().toISOString(), cached: false }
+
+    // Cache in KV
     await c.env.feedbackiq_cache.put('analysis', JSON.stringify(result), { expirationTtl: 300 })
+
+    // Store report in R2
+    try {
+      const report = `FeedbackIQ Analysis Report\nGenerated: ${result.generated_at}\n\nSummary: ${analysis.summary}\n\nSentiment: ${JSON.stringify(analysis.sentiment)}\n\nUrgency: ${JSON.stringify(analysis.urgency)}\n\nThemes:\n${(analysis.themes||[]).map((t: any) => `- ${t.name}: ${t.description}`).join('\n')}\n\nTop Issues:\n${(analysis.top_issues||[]).map((i: any) => `- [${i.urgency}] ${i.title} (${i.source})`).join('\n')}\n\nRecommendations:\n${(analysis.recommendations||[]).map((r: any) => `- ${r.priority}: ${r.action}`).join('\n')}`
+      await c.env.feedbackiq_reports.put(`report-${Date.now()}.txt`, report, {
+        httpMetadata: { contentType: 'text/plain' }
+      })
+    } catch (e) {
+      console.log('R2 store error:', e)
+    }
+
     return c.json(result)
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -137,8 +202,19 @@ body{background:#f9f9f7;color:#0d0d0d;font-family:system-ui,sans-serif;-webkit-f
 .btn-secondary:hover{border-color:#aaa;color:#0d0d0d;}
 .btn-ghost{background:transparent;color:#f25f5c;border:1px solid #f9d5d5;}
 .btn-ghost:hover{background:#fff5f5;}
+.btn-search{background:#f0f5ff;color:#4f8ef7;border:1px solid #d0e0ff;}
+.btn-search:hover{background:#e0ecff;}
 .sources{display:flex;gap:6px;flex-wrap:wrap;margin-top:16px;}
 .source-tag{font-size:11px;font-weight:500;padding:3px 10px;border-radius:100px;background:#fff;border:1px solid #e8e6e0;color:#666;}
+.search-bar{display:flex;gap:8px;margin-bottom:24px;display:none;}
+.search-bar.show{display:flex;}
+.search-input{flex:1;padding:9px 14px;border-radius:7px;border:1.5px solid #e8e6e0;font-size:13px;font-family:inherit;outline:none;}
+.search-input:focus{border-color:#4f8ef7;}
+.search-results{background:#fff;border:1px solid #e8e6e0;border-radius:12px;padding:20px;margin-bottom:20px;display:none;}
+.search-results.show{display:block;}
+.search-result-item{padding:12px 0;border-bottom:1px solid #f0ede8;}
+.search-result-item:last-child{border:none;}
+.search-score{font-size:10px;font-weight:700;color:#4f8ef7;margin-bottom:4px;}
 .status{padding:11px 16px;border-radius:8px;font-size:13px;margin-bottom:24px;display:none;}
 .status.loading{display:block;background:#f0f5ff;color:#4f8ef7;border:1px solid #d0e0ff;}
 .status.error{display:block;background:#fff5f5;color:#e55;border:1px solid #ffd0d0;}
@@ -178,6 +254,8 @@ body{background:#f9f9f7;color:#0d0d0d;font-family:system-ui,sans-serif;-webkit-f
 .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block;margin-right:6px;}
 .results{display:none;}
 .results.show{display:block;}
+.products-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:32px;}
+.product-tag{font-size:11px;font-weight:600;padding:4px 12px;border-radius:100px;background:#fff;border:1px solid #e8e6e0;color:#444;}
 </style>
 </head>
 <body>
@@ -201,10 +279,30 @@ body{background:#f9f9f7;color:#0d0d0d;font-family:system-ui,sans-serif;-webkit-f
       </div>
       <div class="btn-row">
         <button class="btn btn-primary" onclick="runAnalysis()">Run AI Analysis</button>
+        <button class="btn btn-search" onclick="toggleSearch()">Semantic Search</button>
         <button class="btn btn-secondary" onclick="seedData()">Seed Data</button>
         <button class="btn btn-ghost" onclick="clearCache()">Clear Cache</button>
       </div>
     </div>
+  </div>
+
+  <div class="products-bar">
+    <span class="product-tag">Workers</span>
+    <span class="product-tag">D1 Database</span>
+    <span class="product-tag">Workers AI</span>
+    <span class="product-tag">KV Storage</span>
+    <span class="product-tag">Vectorize</span>
+    <span class="product-tag">R2 Object Storage</span>
+  </div>
+
+  <div class="search-bar" id="search-bar">
+    <input class="search-input" id="search-input" placeholder="Search similar feedback semantically... e.g. app is slow" onkeydown="if(event.key==='Enter') runSearch()"/>
+    <button class="btn btn-search" onclick="runSearch()">Search</button>
+  </div>
+
+  <div class="search-results" id="search-results">
+    <div class="card-head">Semantic Search Results</div>
+    <div id="search-results-inner"></div>
   </div>
 
   <div class="status" id="status"></div>
@@ -255,11 +353,42 @@ function setStatus(msg, type) {
   el.textContent = msg
   el.className = 'status ' + type
 }
+function toggleSearch() {
+  const bar = document.getElementById('search-bar')
+  bar.classList.toggle('show')
+  if (bar.classList.contains('show')) document.getElementById('search-input').focus()
+}
+async function runSearch() {
+  const q = document.getElementById('search-input').value.trim()
+  if (!q) return
+  setStatus('Running semantic search...', 'loading')
+  try {
+    const res = await fetch('/api/search?q=' + encodeURIComponent(q))
+    const data = await res.json()
+    if (data.error) { setStatus('Search error: ' + data.error, 'error'); return }
+    const container = document.getElementById('search-results-inner')
+    if (!data.results || data.results.length === 0) {
+      container.innerHTML = '<div style="color:#888;font-size:13px;">No similar feedback found. Try seeding data first.</div>'
+    } else {
+      container.innerHTML = data.results.map(r =>
+        \`<div class="search-result-item">
+          <div class="search-score">Match score: \${(r.score * 100).toFixed(0)}%</div>
+          <div class="item-title" style="margin-bottom:4px;">\${r.content}</div>
+          <div class="item-meta"><span class="badge badge-source">\${r.source}</span> \${r.author}</div>
+        </div>\`
+      ).join('')
+    }
+    document.getElementById('search-results').classList.add('show')
+    setStatus('Semantic search complete — ' + (data.results?.length || 0) + ' similar items found.', 'success')
+  } catch(e) {
+    setStatus('Error: ' + e.message, 'error')
+  }
+}
 async function seedData() {
-  setStatus('Seeding mock feedback data...', 'loading')
+  setStatus('Seeding mock feedback and generating embeddings...', 'loading')
   const res = await fetch('/api/seed')
   const data = await res.json()
-  if (data.success) setStatus(data.message + ' — Ready to analyze.', 'success')
+  if (data.success) setStatus(data.message + ' — Embeddings generated. Ready to analyze.', 'success')
   else setStatus('Error: ' + data.error, 'error')
 }
 async function clearCache() {
@@ -275,7 +404,7 @@ async function runAnalysis() {
     const data = await res.json()
     if (data.error) { setStatus('Error: ' + data.error, 'error'); return }
     renderResults(data)
-    setStatus('Analysis complete — ' + data.analysis.total + ' feedback items processed.', 'success')
+    setStatus('Analysis complete — ' + data.analysis.total + ' feedback items processed. Report saved to R2.', 'success')
     if (data.cached) document.getElementById('cached-note').style.display = 'block'
   } catch(e) {
     setStatus('Error: ' + e.message, 'error')
